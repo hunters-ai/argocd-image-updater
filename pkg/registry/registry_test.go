@@ -2,6 +2,7 @@ package registry
 
 import (
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func Test_GetTags(t *testing.T) {
 
 		img := image.NewFromIdentifier("foo/bar:1.2.0")
 
-		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategySemVer, Options: options.NewManifestOptions()})
+		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategySemVer, Options: options.NewManifestOptions()}, nil)
 		require.NoError(t, err)
 		assert.NotEmpty(t, tl)
 
@@ -50,7 +51,7 @@ func Test_GetTags(t *testing.T) {
 		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{
 			Strategy:  image.StrategySemVer,
 			MatchFunc: image.MatchFuncNone,
-			Options:   options.NewManifestOptions()})
+			Options:   options.NewManifestOptions()}, nil)
 		require.NoError(t, err)
 		assert.Empty(t, tl.Tags())
 
@@ -70,7 +71,7 @@ func Test_GetTags(t *testing.T) {
 
 		img := image.NewFromIdentifier("foo/bar:1.2.0")
 
-		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategyAlphabetical, Options: options.NewManifestOptions()})
+		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategyAlphabetical, Options: options.NewManifestOptions()}, nil)
 		require.NoError(t, err)
 		assert.NotEmpty(t, tl)
 
@@ -102,7 +103,7 @@ func Test_GetTags(t *testing.T) {
 		ep.Cache.ClearCache()
 
 		img := image.NewFromIdentifier("foo/bar:1.2.0")
-		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategyNewestBuild, Options: options.NewManifestOptions()})
+		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategyNewestBuild, Options: options.NewManifestOptions()}, nil)
 		require.NoError(t, err)
 		assert.NotEmpty(t, tl)
 
@@ -159,4 +160,62 @@ registries:
 		assert.Equal(t, "foo", ep.Password)
 	})
 
+}
+
+// simpleTagCache is a minimal TagListCache used in tests.
+type simpleTagCache struct {
+	mu    sync.Mutex
+	store map[string][]string
+	hits  int
+	sets  int
+}
+
+func newSimpleTagCache() *simpleTagCache {
+	return &simpleTagCache{store: make(map[string][]string)}
+}
+
+func (c *simpleTagCache) GetCachedTagList(key string) ([]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.store[key]
+	if ok {
+		c.hits++
+	}
+	return v, ok
+}
+
+func (c *simpleTagCache) SetCachedTagList(key string, tags []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.store[key] = tags
+	c.sets++
+}
+
+// Test_GetTags_TagListCache verifies that when multiple applications reference
+// the same image, Tags() is called exactly once on the registry client and
+// all subsequent calls are served from the cycle-level cache.
+func Test_GetTags_TagListCache(t *testing.T) {
+	const numApps = 5
+
+	ep, err := GetRegistryEndpoint("")
+	require.NoError(t, err)
+
+	regClient := mocks.RegistryClient{}
+	regClient.On("NewRepository", mock.Anything).Return(nil)
+	// Tags() must only be called once despite numApps invocations of GetTags.
+	regClient.On("Tags").Return([]string{"1.0.0", "1.1.0", "1.2.0"}, nil).Once()
+
+	img := image.NewFromIdentifier("foo/bar:1.0.0")
+	cache := newSimpleTagCache()
+
+	for i := 0; i < numApps; i++ {
+		tl, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategySemVer, Options: options.NewManifestOptions()}, cache)
+		require.NoError(t, err)
+		assert.NotEmpty(t, tl.Tags())
+	}
+
+	// Registry was only queried once; the remaining numApps-1 reads came from cache.
+	regClient.AssertNumberOfCalls(t, "Tags", 1)
+	assert.Equal(t, 1, cache.sets, "tag list should be written to cache exactly once")
+	assert.Equal(t, numApps-1, cache.hits, "subsequent calls should be cache hits")
 }

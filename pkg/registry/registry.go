@@ -26,8 +26,17 @@ const (
 	MaxMetadataConcurrency = 20
 )
 
-// GetTags returns a list of available tags for the given image
-func (endpoint *RegistryEndpoint) GetTags(img *image.ContainerImage, regClient RegistryClient, vc *image.VersionConstraint) (*tag.ImageTagList, error) {
+// TagListCache is an optional per-cycle cache for raw tag lists. Implementations
+// must be safe for concurrent use because UpdateApplication runs in goroutines.
+type TagListCache interface {
+	GetCachedTagList(key string) ([]string, bool)
+	SetCachedTagList(key string, tags []string)
+}
+
+// GetTags returns a list of available tags for the given image. When cache is
+// non-nil the raw ECR/registry tag list is reused across calls with the same
+// image, avoiding redundant API calls for images shared across many applications.
+func (endpoint *RegistryEndpoint) GetTags(img *image.ContainerImage, regClient RegistryClient, vc *image.VersionConstraint, cache TagListCache) (*tag.ImageTagList, error) {
 	var tagList *tag.ImageTagList = tag.NewImageTagList()
 	var err error
 
@@ -42,13 +51,31 @@ func (endpoint *RegistryEndpoint) GetTags(img *image.ContainerImage, regClient R
 	} else {
 		nameInRegistry = img.ImageName
 	}
-	err = regClient.NewRepository(nameInRegistry)
-	if err != nil {
-		return nil, err
+
+	// Build a stable cache key that includes the registry so different registries
+	// with the same image name don't collide.
+	cacheKey := endpoint.RegistryPrefix + "/" + nameInRegistry
+
+	var tTags []string
+	if cache != nil {
+		if cached, found := cache.GetCachedTagList(cacheKey); found {
+			logCtx.Debugf("Using cached tag list for %s (%d tags)", cacheKey, len(cached))
+			tTags = cached
+		}
 	}
-	tTags, err := regClient.Tags()
-	if err != nil {
-		return nil, err
+
+	if tTags == nil {
+		err = regClient.NewRepository(nameInRegistry)
+		if err != nil {
+			return nil, err
+		}
+		tTags, err = regClient.Tags()
+		if err != nil {
+			return nil, err
+		}
+		if cache != nil {
+			cache.SetCachedTagList(cacheKey, tTags)
+		}
 	}
 
 	tags := []string{}

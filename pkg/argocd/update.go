@@ -109,13 +109,34 @@ type ChangeEntry struct {
 type SyncIterationState struct {
 	lock            sync.Mutex
 	repositoryLocks map[string]*sync.Mutex
+	// tagListCache stores the raw tag list returned by the registry for each
+	// image, keyed by "registryPrefix/imageName". Populated on first access and
+	// reused for all subsequent applications that reference the same image within
+	// the same reconciliation cycle, eliminating redundant registry API calls.
+	tagListCache map[string][]string
 }
 
 // NewSyncIterationState returns a new instance of SyncIterationState
 func NewSyncIterationState() *SyncIterationState {
 	return &SyncIterationState{
 		repositoryLocks: make(map[string]*sync.Mutex),
+		tagListCache:    make(map[string][]string),
 	}
+}
+
+// GetCachedTagList implements registry.TagListCache.
+func (state *SyncIterationState) GetCachedTagList(key string) ([]string, bool) {
+	state.lock.Lock()
+	defer state.lock.Unlock()
+	tags, found := state.tagListCache[key]
+	return tags, found
+}
+
+// SetCachedTagList implements registry.TagListCache.
+func (state *SyncIterationState) SetCachedTagList(key string, tags []string) {
+	state.lock.Lock()
+	defer state.lock.Unlock()
+	state.tagListCache[key] = tags
 }
 
 // GetRepositoryLock returns the lock for a specified repository
@@ -246,8 +267,10 @@ func UpdateApplication(updateConf *UpdateConfiguration, state *SyncIterationStat
 			continue
 		}
 
-		// Get list of available image tags from the repository
-		tags, err := rep.GetTags(applicationImage, regClient, &vc)
+		// Get list of available image tags from the repository.
+		// Passing state as the TagListCache avoids redundant registry calls when
+		// many applications reference the same image within a single cycle.
+		tags, err := rep.GetTags(applicationImage, regClient, &vc, state)
 		if err != nil {
 			imgCtx.Errorf("Could not get tags from registry: %v", err)
 			result.NumErrors += 1
