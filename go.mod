@@ -1,8 +1,6 @@
 module github.com/argoproj-labs/argocd-image-updater
 
-go 1.21
-
-toolchain go1.22.3
+go 1.25.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.2.1
@@ -23,10 +21,10 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.9.0
 	go.uber.org/ratelimit v0.3.1
-	golang.org/x/crypto v0.21.0
+	golang.org/x/crypto v0.51.0
 	golang.org/x/exp v0.0.0-20230728194245-b0cb94b80691
 	golang.org/x/oauth2 v0.16.0
-	golang.org/x/sync v0.3.0
+	golang.org/x/sync v0.20.0
 	google.golang.org/grpc v1.59.0
 	gopkg.in/yaml.v2 v2.4.0
 	k8s.io/api v0.26.11
@@ -141,13 +139,13 @@ require (
 	go.opentelemetry.io/otel/metric v1.21.0 // indirect
 	go.opentelemetry.io/otel/trace v1.21.0 // indirect
 	go.starlark.net v0.0.0-20220328144851-d1966c6b9fcd // indirect
-	golang.org/x/mod v0.12.0 // indirect
-	golang.org/x/net v0.23.0 // indirect
-	golang.org/x/sys v0.20.0 // indirect
-	golang.org/x/term v0.18.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
-	golang.org/x/tools v0.13.0 // indirect
+	golang.org/x/tools v0.44.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20230822172742-b8732ec3820d // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
@@ -204,5 +202,4 @@ replace (
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.26.11
 	k8s.io/sample-cli-plugin => k8s.io/sample-cli-plugin v0.26.11
 	k8s.io/sample-controller => k8s.io/sample-controller v0.26.11
-
 )
