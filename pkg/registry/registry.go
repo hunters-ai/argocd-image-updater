@@ -52,23 +52,28 @@ func (endpoint *RegistryEndpoint) GetTags(img *image.ContainerImage, regClient R
 		nameInRegistry = img.ImageName
 	}
 
+	// regClient is a fresh client per image, and the metadata fetches below need
+	// the repository set even when the tag list comes from the cache.
+	err = regClient.NewRepository(nameInRegistry)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build a stable cache key that includes the registry so different registries
 	// with the same image name don't collide.
 	cacheKey := endpoint.RegistryPrefix + "/" + nameInRegistry
 
 	var tTags []string
+	hit := false
 	if cache != nil {
 		if cached, found := cache.GetCachedTagList(cacheKey); found {
 			logCtx.Debugf("Using cached tag list for %s (%d tags)", cacheKey, len(cached))
 			tTags = cached
+			hit = true
 		}
 	}
 
-	if tTags == nil {
-		err = regClient.NewRepository(nameInRegistry)
-		if err != nil {
-			return nil, err
-		}
+	if !hit {
 		tTags, err = regClient.Tags()
 		if err != nil {
 			return nil, err

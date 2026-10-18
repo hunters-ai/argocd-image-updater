@@ -219,3 +219,64 @@ func Test_GetTags_TagListCache(t *testing.T) {
 	assert.Equal(t, 1, cache.sets, "tag list should be written to cache exactly once")
 	assert.Equal(t, numApps-1, cache.hits, "subsequent calls should be cache hits")
 }
+
+// Test_GetTags_TagListCache_NewestBuild mirrors UpdateApplication, which builds a
+// new client per image: a cache hit must still set up the repository on that
+// client before fetching manifests.
+func Test_GetTags_TagListCache_NewestBuild(t *testing.T) {
+	ts := "2006-01-02T15:04:05.999999999Z"
+	meta := &schema1.SignedManifest{ //nolint:staticcheck
+		Manifest: schema1.Manifest{ //nolint:staticcheck
+			History: []schema1.History{ //nolint:staticcheck
+				{V1Compatibility: `{"created":"` + ts + `"}`},
+			},
+		},
+	}
+	newClient := func() *mocks.RegistryClient {
+		c := &mocks.RegistryClient{}
+		c.On("NewRepository", mock.Anything).Return(nil)
+		c.On("Tags", mock.Anything).Return([]string{"1.0.0", "1.1.0"}, nil)
+		c.On("ManifestForTag", mock.Anything, mock.Anything).Return(meta, nil)
+		c.On("TagMetadata", mock.Anything, mock.Anything).Return(&tag.TagInfo{}, nil)
+		return c
+	}
+
+	ep, err := GetRegistryEndpoint("")
+	require.NoError(t, err)
+	img := image.NewFromIdentifier("foo/bar:1.0.0")
+	vc := &image.VersionConstraint{Strategy: image.StrategyNewestBuild, Options: options.NewManifestOptions()}
+	cache := newSimpleTagCache()
+
+	first := newClient()
+	ep.Cache.ClearCache()
+	_, err = ep.GetTags(img, first, vc, cache)
+	require.NoError(t, err)
+
+	second := newClient()
+	ep.Cache.ClearCache()
+	tl, err := ep.GetTags(img, second, vc, cache)
+	require.NoError(t, err)
+	assert.Len(t, tl.Tags(), 2)
+
+	first.AssertNumberOfCalls(t, "Tags", 1)
+	second.AssertNumberOfCalls(t, "Tags", 0)
+	second.AssertNumberOfCalls(t, "NewRepository", 1)
+	second.AssertNumberOfCalls(t, "ManifestForTag", 2)
+}
+
+func Test_GetTags_TagListCache_EmptyRepo(t *testing.T) {
+	ep, err := GetRegistryEndpoint("")
+	require.NoError(t, err)
+
+	regClient := mocks.RegistryClient{}
+	regClient.On("NewRepository", mock.Anything).Return(nil)
+	regClient.On("Tags").Return(nil, nil).Once()
+
+	img := image.NewFromIdentifier("foo/empty:1.0.0")
+	cache := newSimpleTagCache()
+	for i := 0; i < 3; i++ {
+		_, err := ep.GetTags(img, &regClient, &image.VersionConstraint{Strategy: image.StrategySemVer, Options: options.NewManifestOptions()}, cache)
+		require.NoError(t, err)
+	}
+	regClient.AssertNumberOfCalls(t, "Tags", 1)
+}
