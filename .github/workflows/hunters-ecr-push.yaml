@@ -1,0 +1,68 @@
+# Builds the image the Hunters ArgoCD image-updaters run and pushes it to the
+# argocd-image-updater ECR repository in hunters-ops (171312943278). Runs on
+# every push to master and on demand from master. AWS access is the OIDC role
+# argocd-image-updater-ci-ecr-push (infrastructure: ops-eks/argocd_image_updater_ci.tf),
+# whose trust policy accepts only this repository's master ref, through the
+# repository variable HUNTERS_ECR_PUSH_ROLE_ARN. Until that variable is set the
+# job skips, so the workflow is safe to merge before the role exists.
+#
+# Images are tagged master-<short sha> only. No moving tag is written, so a
+# build never changes what a cluster runs: helm-charts pins the exact tag.
+
+name: Build and push to Hunters ECR
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build_and_push:
+    if: github.repository == 'hunters-ai/argocd-image-updater' && vars.HUNTERS_ECR_PUSH_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    env:
+      ECR_REGISTRY: 171312943278.dkr.ecr.us-west-2.amazonaws.com
+      ECR_REPOSITORY: argocd-image-updater
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.HUNTERS_ECR_PUSH_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registries: "171312943278"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        run: |
+          set -euo pipefail
+          TAG="master-${GITHUB_SHA::7}"
+          IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${TAG}"
+          if aws ecr describe-images --region us-west-2 --repository-name "${ECR_REPOSITORY}" \
+               --image-ids "imageTag=${TAG}" >/dev/null 2>&1; then
+            echo "${IMAGE} already exists, not overwriting"
+            exit 0
+          fi
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --pull \
+            --push \
+            -t "${IMAGE}" \
+            .
+          echo "pushed ${IMAGE}"
