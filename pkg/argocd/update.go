@@ -2,6 +2,7 @@ package argocd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -348,7 +349,10 @@ func UpdateApplication(updateConf *UpdateConfiguration, state *SyncIterationStat
 		if !updateConf.DryRun {
 			logCtx.Infof("Committing %d parameter update(s) for application %s", result.NumImagesUpdated, app)
 			err := commitChangesLocked(&updateConf.UpdateApp.Application, wbc, state, changeList)
-			if err != nil {
+			if errors.Is(err, errNothingWritten) {
+				logCtx.Debugf("Write-back target already up to date, not counting an update")
+				result.NumImagesUpdated = 0
+			} else if err != nil {
 				logCtx.Errorf("Could not update application spec: %v", err)
 				result.NumErrors += 1
 				result.NumImagesUpdated = 0

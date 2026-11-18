@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -126,6 +127,10 @@ func TemplateBranchName(branchName string, changeList []ChangeEntry) string {
 
 type changeWriter func(app *v1alpha1.Application, wbc *WriteBackConfig, gitC git.Client) (err error, skip bool)
 
+// errNothingWritten is returned by commitChangesGit when the write-back target
+// already holds the wanted state, so nothing was committed or pushed.
+var errNothingWritten = errors.New("write-back target unchanged, nothing committed")
+
 // commitChanges commits any changes required for updating one or more images
 // after the UpdateApplication cycle has finished.
 func commitChangesGit(app *v1alpha1.Application, wbc *WriteBackConfig, changeList []ChangeEntry, write changeWriter) error {
@@ -215,7 +220,7 @@ func commitChangesGit(app *v1alpha1.Application, wbc *WriteBackConfig, changeLis
 	if err, skip := write(app, wbc, gitC); err != nil {
 		return err
 	} else if skip {
-		return nil
+		return errNothingWritten
 	}
 
 	commitOpts := &git.CommitOptions{}

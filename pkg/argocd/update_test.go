@@ -1,10 +1,13 @@
 package argocd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1135,6 +1138,85 @@ func Test_UpdateApplication(t *testing.T) {
 		assert.Equal(t, 0, res.NumImagesUpdated)
 	})
 
+}
+
+// A force-update image with no running pod is an update candidate on every
+// pass. It counts as updated only when the write-back pushed a commit.
+func Test_UpdateApplicationCountsOnlyWrittenUpdates(t *testing.T) {
+	const target = "us-west-2-prod-new/job.yaml"
+	for _, tc := range []struct {
+		name        string
+		tagInGit    string
+		wantUpdated int
+	}{
+		{"newest tag already in git", "1.0.2", 0},
+		{"older tag in git", "1.0.1", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seed := t.TempDir()
+			runGit(t, seed, "init", "--initial-branch=main")
+			require.NoError(t, os.MkdirAll(filepath.Join(seed, filepath.Dir(target)), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(seed, target),
+				[]byte("image:\n  name: gcr.io/jannfis/job\n  tag: "+tc.tagInGit+"\n"), 0600))
+			runGit(t, seed, "add", ".")
+			runGit(t, seed, "-c", "user.name=seed", "-c", "user.email=seed@example.com", "commit", "-m", "seed")
+			remote := filepath.Join(t.TempDir(), "history.git")
+			runGit(t, seed, "clone", "--bare", seed, remote)
+			repoURL := "file://" + remote
+
+			repoSecret := fixture.NewSecret("argocd", "history-repo", map[string][]byte{
+				"url":      []byte(repoURL),
+				"username": []byte("git"),
+				"password": []byte("unused"),
+			})
+			repoSecret.Labels = map[string]string{"argocd.argoproj.io/secret-type": "repository"}
+			kubeClient := kube.KubernetesClient{
+				Clientset: fake.NewFakeClientsetWithResources(repoSecret),
+				Namespace: "argocd",
+			}
+
+			annotations := map[string]string{
+				common.ImageUpdaterAnnotation:                           "job=gcr.io/jannfis/job:~1.0",
+				fmt.Sprintf(common.HelmParamImageNameAnnotation, "job"): "image.name",
+				fmt.Sprintf(common.HelmParamImageTagAnnotation, "job"):  "image.tag",
+				fmt.Sprintf(common.ForceUpdateOptionAnnotation, "job"):  "true",
+				common.WriteBackMethodAnnotation:                        "git",
+				common.GitBranchAnnotation:                              "main",
+				common.GitRepositoryAnnotation:                          repoURL,
+				common.WriteBackTargetAnnotation:                        "helmvalues:/" + target,
+			}
+			appImages := &ApplicationImages{
+				Application: v1alpha1.Application{
+					ObjectMeta: v1.ObjectMeta{Name: "job", Namespace: "argocd", Annotations: annotations},
+					Spec: v1alpha1.ApplicationSpec{
+						Source: &v1alpha1.ApplicationSource{
+							RepoURL: "https://example.com/charts",
+							Helm:    &v1alpha1.ApplicationSourceHelm{},
+						},
+					},
+					Status: v1alpha1.ApplicationStatus{SourceType: v1alpha1.ApplicationSourceTypeHelm},
+				},
+				Images: *parseImageList(annotations),
+			}
+
+			res := UpdateApplication(&UpdateConfiguration{
+				NewRegFN:       jobRegistryClient,
+				KubeClient:     &kubeClient,
+				UpdateApp:      appImages,
+				GitCommitUser:  "argocd-image-updater",
+				GitCommitEmail: "noreply@argoproj.io",
+			}, NewSyncIterationState())
+
+			events, err := kubeClient.Clientset.CoreV1().Events("argocd").List(context.Background(), v1.ListOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, 0, res.NumErrors)
+			assert.Equal(t, 1, res.NumImagesConsidered)
+			assert.Equal(t, "image:\n  name: gcr.io/jannfis/job\n  tag: 1.0.2", runGit(t, remote, "show", "main:"+target))
+			assert.Equal(t, strconv.Itoa(1+tc.wantUpdated), runGit(t, remote, "rev-list", "--count", "main"))
+			assert.Equal(t, tc.wantUpdated, res.NumImagesUpdated)
+			assert.Len(t, events.Items, tc.wantUpdated)
+		})
+	}
 }
 
 func Test_MarshalParamsOverride(t *testing.T) {
@@ -3521,6 +3603,23 @@ func Test_parseTarget(t *testing.T) {
 			assert.Equal(t, tt.expected, parseTarget(tt.target, tt.path))
 		})
 	}
+}
+
+// jobRegistryClient stands in for a registry that holds tags 1.0.1 and 1.0.2.
+func jobRegistryClient(endpoint *registry.RegistryEndpoint, username, password string) (registry.RegistryClient, error) {
+	regMock := regmock.RegistryClient{}
+	regMock.On("NewRepository", mock.Anything).Return(nil)
+	regMock.On("Tags", mock.Anything).Return([]string{"1.0.1", "1.0.2"}, nil)
+	return &regMock, nil
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
 }
 
 func mockGit(t *testing.T) (gitMock *gitmock.Client, dir string, cleanup func()) {
